@@ -468,7 +468,7 @@ export default function Home() {
 
   // ── オンボーディング完了 ──────────────────────────────────
   function finishOnboarding() {
-    const ns = { ...state, onboardingDone: true };
+    const ns: AppState = { ...state!, onboardingDone: true };
     saveState(ns);
     setState(ns);
     setOnbStep(null);
