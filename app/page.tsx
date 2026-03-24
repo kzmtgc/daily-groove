@@ -300,6 +300,14 @@ export default function Home() {
     }
   }, [mounted, state, loading, error, fetchDiscover]);
 
+  // デスクトップ幅（900px以上）なら /desktop にリダイレクト
+  useEffect(() => {
+    if (window.innerWidth >= 900) {
+      window.location.replace("/desktop");
+      return;
+    }
+  }, []);
+
   // stateRefを常に最新に保つ
   useEffect(() => { stateRef.current = state; }, [state]);
   useEffect(() => { playerAlbumRef.current = playerAlbumId; }, [playerAlbumId]);
