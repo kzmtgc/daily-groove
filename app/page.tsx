@@ -476,6 +476,7 @@ export default function Home() {
 
   // ── オンボーディング完了 ──────────────────────────────────
   function finishOnboarding() {
+    if (!state) { setOnbStep(null); return; }
     const ns = { ...state, onboardingDone: true };
     saveState(ns);
     setState(ns);
