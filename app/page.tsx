@@ -1,6 +1,6 @@
 "use client";
 import { useState, useEffect, useCallback, useRef } from "react";
-import { AppState, DayRecord, loadState, saveState, todayString } from "@/lib/store";
+import { AppState, DayRecord, TasteProfile, loadState, saveState, todayString } from "@/lib/store";
 
 // ── 型定義（albums.ts不要）────────────────────────────────────
 export type Album = {
@@ -175,7 +175,14 @@ export default function Home() {
   const [trackStartOverride, setTrackStartOverride] = useState<Record<string, number>>({});
   // オンボーディング
   // step: null=通常, "welcome"=初回WS, 1=グリッド説明, 2=1枚後, 3=groove説明, 4=collection説明
-  const [onbStep, setOnbStep] = useState<null | "welcome" | 1 | 2 | 3 | 4>(null);
+  const [onbStep, setOnbStep] = useState<null | "welcome" | "genre" | "swipe" | 1 | 2 | 3 | 4>(null);
+  // ジャンル選択・スワイプ用state
+  const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
+  const [swipeAlbums, setSwipeAlbums] = useState<Album[]>([]);
+  const [swipeIndex, setSwipeIndex] = useState(0);
+  const [swipeResults, setSwipeResults] = useState<{ album: Album; liked: boolean }[]>([]);
+  const [swipeLoading, setSwipeLoading] = useState(false);
+  const [swipeDir, setSwipeDir] = useState<"left" | "right" | null>(null);
 
   // カレンダーモーダル
   const [showCalendar, setShowCalendar] = useState(false);
@@ -475,12 +482,100 @@ export default function Home() {
   const done = tab === "today-done" || state.todayAlbums.length >= 2;
 
   // ── オンボーディング完了 ──────────────────────────────────
-  function finishOnboarding() {
+  function finishOnboarding(profile?: TasteProfile) {
     if (!state) { setOnbStep(null); return; }
-    const ns = { ...state, onboardingDone: true };
+    const ns = {
+      ...state,
+      onboardingDone: true,
+      tasteProfile: profile ?? state.tasteProfile,
+    };
     saveState(ns);
     setState(ns);
     setOnbStep(null);
+  }
+
+  // ジャンル選択完了 → スワイプ用アルバムfetch
+  async function startSwipe(genres: string[]) {
+    setSwipeLoading(true);
+    setSwipeAlbums([]);
+    setSwipeIndex(0);
+    setSwipeResults([]);
+    try {
+      const genre = genres[0] ?? "all";
+      const page = Math.floor(Math.random() * 15);
+      const res = await fetch(`/api/bandcamp-discover?genre=${genre}&page=${page}`);
+      const data = await res.json();
+      if (data.albums?.length) {
+        setSwipeAlbums(data.albums.slice(0, 3));
+      }
+    } catch {}
+    setSwipeLoading(false);
+    setOnbStep("swipe");
+  }
+
+  // スワイプ操作
+  function handleSwipe(liked: boolean) {
+    const album = swipeAlbums[swipeIndex];
+    if (!album) return;
+    setSwipeDir(liked ? "right" : "left");
+    setTimeout(() => {
+      setSwipeDir(null);
+      const newResults = [...swipeResults, { album, liked }];
+      setSwipeResults(newResults);
+      if (swipeIndex + 1 >= swipeAlbums.length) {
+        // スワイプ完了 → tasteProfile生成 → パーソナライズfetch
+        const likedGenres = [...new Set(newResults.filter(r => r.liked).map(r => r.album.genre).filter(Boolean))];
+        const dislikedGenres = [...new Set(newResults.filter(r => !r.liked).map(r => r.album.genre).filter(Boolean))];
+        const likedAlbumIds = newResults.filter(r => r.liked).map(r => r.album.id);
+        const profile: TasteProfile = {
+          likedGenres: likedGenres.length > 0 ? likedGenres : selectedGenres,
+          dislikedGenres,
+          likedAlbumIds,
+        };
+        // パーソナライズfetchを実行
+        fetchPersonalized(profile);
+        finishOnboarding(profile);
+      } else {
+        setSwipeIndex(i => i + 1);
+      }
+    }, 350);
+  }
+
+  // 好みに基づくパーソナライズfetch
+  async function fetchPersonalized(profile: TasteProfile) {
+    setLoading(true);
+    setError(null);
+    try {
+      const liked = [...new Set([...profile.likedGenres, ...selectedGenres])].join(",");
+      const disliked = profile.dislikedGenres.join(",");
+      const url = `/api/bandcamp-discover?likedGenres=${encodeURIComponent(liked)}${disliked ? `&dislikedGenres=${encodeURIComponent(disliked)}` : ""}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const data = await res.json();
+      if (!data.albums?.length) throw new Error("No albums returned");
+      const albums: Album[] = data.albums.map((a: {
+        id: string; title: string; artist: string; genre?: string;
+        bandcampUrl: string; bandcampId: string; imageUrl?: string;
+        tracks?: { id: string; number: number; title: string; duration: string }[];
+      }) => ({
+        id: a.id, title: a.title, artist: a.artist,
+        year: new Date().getFullYear(), genre: a.genre || "Indie",
+        emoji: "🎵", color: "#1a1a2e",
+        bandcampUrl: a.bandcampUrl, bandcampId: a.bandcampId, imageUrl: a.imageUrl,
+        tracks: (a.tracks && a.tracks.length > 0)
+          ? a.tracks.map((t, i) => ({ ...t, id: `${a.id}-${i + 1}` }))
+          : Array.from({ length: 10 }, (_, i) => ({ id: `${a.id}-${i + 1}`, number: i + 1, title: `Track ${i + 1}`, duration: "" })),
+      }));
+      setState(prev => {
+        if (!prev) return prev;
+        const ns = { ...prev, suggestedAlbums: albums, todayAlbums: [], listenedTracks: {}, lastPickedDate: todayString() };
+        saveState(ns); return ns;
+      });
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setLoading(false);
+    }
   }
 
   // ── コーチマーク設定 ──────────────────────────────────────
@@ -622,7 +717,7 @@ export default function Home() {
 
         {/* STARTボタン */}
         <button
-          onClick={() => setOnbStep(1)}
+          onClick={() => setOnbStep("genre")}
           style={{
             width: "100%", maxWidth: "320px",
             background: "#E8000D", border: "none", borderRadius: "16px",
@@ -643,6 +738,207 @@ export default function Home() {
         <div style={{ marginTop: "20px", fontSize: "11px", color: "rgba(255,255,255,0.25)", letterSpacing: "0.1em", animation: "slideUpFade 0.5s 0.9s ease both" }}>
           Powered by Bandcamp Discover
         </div>
+      </div>
+    )}
+
+
+    {/* ====== ONBOARDING: ジャンル選択 ====== */}
+    {onbStep === "genre" && (
+      <div style={{
+        position: "fixed", inset: 0, zIndex: 9000,
+        background: "#0a0a0a",
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        padding: "40px 28px",
+        animation: "fadeIn 0.4s ease forwards",
+      }}>
+        <div style={{ fontFamily: "'Bangers', cursive", fontSize: "32px", letterSpacing: "0.06em", color: "#E8000D", marginBottom: "8px" }}>
+          STEP 1 / 2
+        </div>
+        <div style={{ fontFamily: "'Bangers', cursive", fontSize: "44px", color: "white", letterSpacing: "0.04em", marginBottom: "8px", textAlign: "center" }}>
+          好きなジャンルは？
+        </div>
+        <div style={{ fontSize: "13px", color: "rgba(255,255,255,0.4)", marginBottom: "36px", textAlign: "center" }}>
+          複数選べます。直感で。
+        </div>
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "10px", justifyContent: "center", maxWidth: "340px", marginBottom: "40px" }}>
+          {[
+            { id: "electronic", label: "Electronic" },
+            { id: "rock", label: "Rock" },
+            { id: "jazz", label: "Jazz" },
+            { id: "folk", label: "Folk" },
+            { id: "hip-hop-rap", label: "Hip-Hop" },
+            { id: "ambient", label: "Ambient" },
+            { id: "classical", label: "Classical" },
+            { id: "metal", label: "Metal" },
+            { id: "pop", label: "Pop" },
+            { id: "experimental", label: "Experimental" },
+            { id: "soul-rnb", label: "Soul / R&B" },
+            { id: "punk", label: "Punk" },
+          ].map(({ id, label }) => {
+            const selected = selectedGenres.includes(id);
+            return (
+              <button key={id}
+                onClick={() => setSelectedGenres(prev =>
+                  prev.includes(id) ? prev.filter(g => g !== id) : [...prev, id]
+                )}
+                style={{
+                  padding: "10px 18px",
+                  borderRadius: "100px",
+                  border: `2px solid ${selected ? "#E8000D" : "rgba(255,255,255,0.15)"}`,
+                  background: selected ? "#E8000D" : "transparent",
+                  color: selected ? "white" : "rgba(255,255,255,0.7)",
+                  fontSize: "14px", fontWeight: 600,
+                  cursor: "pointer",
+                  transition: "all 0.15s ease",
+                }}
+              >{label}</button>
+            );
+          })}
+        </div>
+
+        <button
+          onClick={() => {
+            if (selectedGenres.length === 0) {
+              // 選ばなかった場合はスキップしてそのままonb step1へ
+              setOnbStep(1);
+              return;
+            }
+            startSwipe(selectedGenres);
+          }}
+          disabled={false}
+          style={{
+            width: "100%", maxWidth: "320px",
+            background: selectedGenres.length > 0 ? "#E8000D" : "rgba(255,255,255,0.1)",
+            border: "none", borderRadius: "16px",
+            padding: "18px 24px", cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center", gap: "10px",
+            transition: "background 0.2s",
+          }}>
+          <span style={{ fontFamily: "'Bangers', cursive", fontSize: "26px", letterSpacing: "0.1em", color: "white" }}>
+            {selectedGenres.length > 0 ? "次へ →" : "スキップ"}
+          </span>
+        </button>
+      </div>
+    )}
+
+    {/* ====== ONBOARDING: スワイプ試聴 ====== */}
+    {onbStep === "swipe" && (
+      <div style={{
+        position: "fixed", inset: 0, zIndex: 9000,
+        background: "#0a0a0a",
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        padding: "40px 28px",
+        animation: "fadeIn 0.4s ease forwards",
+      }}>
+        <div style={{ fontFamily: "'Bangers', cursive", fontSize: "32px", letterSpacing: "0.06em", color: "#E8000D", marginBottom: "8px" }}>
+          STEP 2 / 2
+        </div>
+        <div style={{ fontFamily: "'Bangers', cursive", fontSize: "36px", color: "white", letterSpacing: "0.04em", marginBottom: "6px", textAlign: "center" }}>
+          好き？嫌い？
+        </div>
+        <div style={{ fontSize: "12px", color: "rgba(255,255,255,0.4)", marginBottom: "32px", textAlign: "center" }}>
+          {swipeAlbums.length > 0 ? `${swipeIndex + 1} / ${swipeAlbums.length}` : ""}
+          {" "}直感で答えてください
+        </div>
+
+        {swipeLoading ? (
+          <div style={{ fontFamily: "'Bangers', cursive", fontSize: "32px", color: "#E8000D" }}>LOADING...</div>
+        ) : swipeAlbums[swipeIndex] ? (() => {
+          const album = swipeAlbums[swipeIndex];
+          return (
+            <div style={{ width: "100%", maxWidth: "300px" }}>
+              {/* アルバムカード */}
+              <div style={{
+                width: "100%",
+                borderRadius: "20px",
+                overflow: "hidden",
+                background: "#1a1a2e",
+                boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
+                marginBottom: "24px",
+                transform: swipeDir === "right" ? "translateX(120%) rotate(12deg)" : swipeDir === "left" ? "translateX(-120%) rotate(-12deg)" : "translateX(0)",
+                transition: "transform 0.35s cubic-bezier(0.4,0,0.2,1)",
+              }}>
+                {/* アートワーク */}
+                <div style={{ width: "100%", aspectRatio: "1/1", position: "relative", background: "#1a1a2e" }}>
+                  {album.imageUrl ? (
+                    <img src={album.imageUrl} alt={album.title}
+                      style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  ) : (
+                    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "64px" }}>🎵</div>
+                  )}
+                  {/* 試聴ボタン */}
+                  {album.bandcampId && (
+                    <a href={album.bandcampUrl} target="_blank" rel="noopener noreferrer"
+                      onClick={e => e.stopPropagation()}
+                      style={{
+                        position: "absolute", bottom: "12px", right: "12px",
+                        background: "rgba(0,0,0,0.75)", borderRadius: "20px",
+                        padding: "7px 14px", textDecoration: "none",
+                        display: "flex", alignItems: "center", gap: "6px",
+                        backdropFilter: "blur(8px)",
+                      }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="white"><polygon points="5,3 19,12 5,21"/></svg>
+                      <span style={{ fontSize: "11px", color: "white", fontWeight: 600 }}>試聴</span>
+                    </a>
+                  )}
+                </div>
+                {/* テキスト */}
+                <div style={{ padding: "16px 18px 18px" }}>
+                  <div style={{ fontSize: "11px", color: "#E8000D", fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: "5px" }}>
+                    #{album.genre}
+                  </div>
+                  <div style={{ fontSize: "17px", fontWeight: 700, color: "white", marginBottom: "3px",
+                    whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {album.title}
+                  </div>
+                  <div style={{ fontSize: "13px", color: "rgba(255,255,255,0.55)" }}>{album.artist}</div>
+                </div>
+              </div>
+
+              {/* 好き・嫌いボタン */}
+              <div style={{ display: "flex", gap: "12px" }}>
+                <button
+                  onClick={() => handleSwipe(false)}
+                  style={{
+                    flex: 1, padding: "16px", border: "2px solid rgba(255,255,255,0.15)",
+                    background: "transparent", borderRadius: "14px", cursor: "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+                    transition: "all 0.15s",
+                  }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.4)"; }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = "rgba(255,255,255,0.15)"; }}
+                >
+                  <span style={{ fontSize: "22px" }}>👎</span>
+                  <span style={{ fontFamily: "'Bangers', cursive", fontSize: "18px", color: "rgba(255,255,255,0.6)", letterSpacing: "0.05em" }}>NO</span>
+                </button>
+                <button
+                  onClick={() => handleSwipe(true)}
+                  style={{
+                    flex: 1, padding: "16px",
+                    background: "#E8000D", border: "none",
+                    borderRadius: "14px", cursor: "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+                    boxShadow: "0 4px 20px rgba(232,0,13,0.4)",
+                    transition: "all 0.15s",
+                  }}
+                >
+                  <span style={{ fontSize: "22px" }}>👍</span>
+                  <span style={{ fontFamily: "'Bangers', cursive", fontSize: "18px", color: "white", letterSpacing: "0.05em" }}>YES!</span>
+                </button>
+              </div>
+
+              {/* スキップ */}
+              <div style={{ textAlign: "center", marginTop: "16px" }}>
+                <button onClick={() => { finishOnboarding(); setOnbStep(null); }}
+                  style={{ background: "transparent", border: "none", cursor: "pointer",
+                    fontSize: "12px", color: "rgba(255,255,255,0.25)", textDecoration: "underline" }}>
+                  スキップしてランダムで始める
+                </button>
+              </div>
+            </div>
+          );
+        })() : null}
       </div>
     )}
 
@@ -1170,6 +1466,24 @@ export default function Home() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          {/* 今日の気分ボタン（tasteProfile設定済みのときのみ表示） */}
+          {state.tasteProfile && !done && (
+            <button
+              onClick={() => {
+                setSelectedGenres(state.tasteProfile?.likedGenres ?? []);
+                startSwipe(state.tasteProfile?.likedGenres ?? []);
+              }}
+              title="今日の気分で再調整"
+              style={{
+                background: "transparent", border: "2px solid #E8000D",
+                borderRadius: "20px", padding: "6px 12px",
+                display: "flex", alignItems: "center", gap: "6px",
+                cursor: "pointer", flexShrink: 0,
+              }}>
+              <span style={{ fontSize: "13px", color: "#E8000D", fontWeight: 700, letterSpacing: "0.04em" }}>今日の気分</span>
+            </button>
+          )}
+
           {/* カレンダーボタン */}
           <button
             onClick={() => setShowCalendar(true)}

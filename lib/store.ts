@@ -21,6 +21,13 @@ export type DayRecord = {
   pickedAlbums: Album[]; // ピックした2枚
 };
 
+// 好みプロフィール
+export type TasteProfile = {
+  likedGenres: string[];   // 好きと判定されたジャンル
+  dislikedGenres: string[]; // 嫌いと判定されたジャンル
+  likedAlbumIds: string[]; // 好きと判定されたアルバムID
+};
+
 export type AppState = {
   suggestedAlbums: Album[];
   todayAlbums: Album[];
@@ -29,6 +36,7 @@ export type AppState = {
   lastPickedDate: string;
   history: DayRecord[]; // 過去の全履歴
   onboardingDone: boolean; // 初回オンボーディング完了フラグ
+  tasteProfile: TasteProfile | null; // 好みプロフィール（null=未設定）
 };
 
 const STORAGE_KEY = "earworm";
@@ -41,6 +49,7 @@ const defaultState: AppState = {
   lastPickedDate: "",
   history: [],
   onboardingDone: false,
+  tasteProfile: null,
 };
 
 export function todayString(): string {
